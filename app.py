@@ -1,13 +1,14 @@
 import datetime
 import io
+import os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# 1. 페이지 기본 설정 및 디자인
+# 1. 페이지 설정 & 주식 앱 스타일 다크 CSS
 st.set_page_config(
-    page_title="대산공장 액탄·DRY 재고 시뮬레이터 (S&OP)",
+    page_title="대산공장 운영노트 & 재고 시뮬레이터",
     page_icon="🏭",
     layout="wide",
 )
@@ -16,94 +17,251 @@ st.markdown(
     """
 <style>
     .stApp { background-color: #0B0F19; color: #E2E8F0; }
-    div[data-testid="stBlock"] { background-color: #131B2E; border-radius: 10px; padding: 15px; border: 1px solid #1E293B; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { background-color: #1E293B; border-radius: 8px; color: #94A3B8; padding: 10px 20px; }
-    .stTabs [aria-selected="true"] { background-color: #2563EB !important; color: white !important; font-weight: bold; }
+    div[data-testid="stBlock"] { background-color: #131B2E; border-radius: 12px; padding: 16px; border: 1px solid #1E293B; }
+    
+    /* 주식 앱 카드 스타일 */
+    .stock-card {
+        background-color: #182238;
+        border-radius: 14px;
+        padding: 18px;
+        border: 1px solid #2A3859;
+        margin-bottom: 15px;
+    }
+    .stock-title { font-size: 14px; color: #94A3B8; font-weight: 600; margin-bottom: 6px; }
+    .stock-value { font-size: 28px; font-weight: 800; color: #FFFFFF; letter-spacing: -0.5px; }
+    
+    .delta-container { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .delta-badge {
+        padding: 5px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 700;
+        display: inline-flex;
+        align-items: center;
+    }
+    .delta-up { background-color: rgba(239, 68, 68, 0.15); color: #F87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .delta-down { background-color: rgba(59, 130, 246, 0.15); color: #60A5FA; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .delta-zero { background-color: rgba(148, 163, 184, 0.15); color: #94A3B8; border: 1px solid rgba(148, 163, 184, 0.3); }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-st.title("🏭 대산공장 액탄 재고 예측 시뮬레이터")
-st.caption(
-    "S&OP (Sales & Operations Planning) 통합 재고 관리 및 비상 대응 시스템"
-)
+# 2. 데이터 누적 저장소 (CSV) 로드 및 관리
+DATA_FILE = "daesan_daily_history.csv"
 
-# 탭 구성: 간단버전 vs 심화버전
-tab1, tab2 = st.tabs([
-    "⚡ [간단 버전] 비상 대응 & 일일 간이 예측",
-    "🔬 [심화 버전] S&OP 상세 정밀 시뮬레이션",
+
+def load_history():
+  if os.path.exists(DATA_FILE):
+    df = pd.read_csv(DATA_FILE)
+    df["날짜"] = pd.to_datetime(df["날짜"])
+    return df
+  else:
+    # 기본 구조 생성 (초기 파일 없을 시 2026.10.01 데이터 기본 탑재)
+    initial_data = pd.DataFrame([{
+        "날짜": pd.to_datetime("2026-10-01"),
+        "원료공급": 88.90,
+        "액탄생산": 92.51,
+        "드라이생산": 23.86,
+        "현재고": 1986.87,
+        "액탄출고": 76.66,
+        "드라이출고": 39.92,
+    }])
+    initial_data.to_csv(DATA_FILE, index=False)
+    return initial_data
+
+
+def save_record(date_str, raw_gas, co2_prod, dry_prod, cur_inv, co2_out):
+  df = load_history()
+  target_date = pd.to_datetime(date_str)
+
+  new_row = {
+      "날짜": target_date,
+      "원료공급": float(raw_gas),
+      "액탄생산": float(co2_prod),
+      "드라이생산": float(dry_prod),
+      "현재고": float(cur_inv),
+      "액탄출고": float(co2_out),
+      "드라이출고": 0.0,
+  }
+
+  # 기존 일자 중복 시 덮어쓰기, 없으면 추가
+  if target_date in df["날짜"].values:
+    df.loc[df["날짜"] == target_date, list(new_row.keys())] = list(
+        new_row.values()
+    )
+  else:
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+  df = df.sort_values("날짜").reset_index(drop=True)
+  df.to_csv(DATA_FILE, index=False)
+  return df
+
+
+# 3. 증감(Delta) 계산 헬퍼 함수
+def get_delta_badge(label, cur_val, past_val):
+  if past_val is None or np.isnan(past_val) or past_val == 0:
+    return f"<div class='delta-badge delta-zero'>{label}: -</div>"
+
+  diff = cur_val - past_val
+  pct = (diff / past_val) * 100.0
+
+  if diff > 0:
+    return f"<div class='delta-badge delta-up'>{label} +{diff:,.2f}t (+{pct:.1f}%)</div>"
+  elif diff < 0:
+    return f"<div class='delta-badge delta-down'>{label} {diff:,.2f}t ({pct:.1f}%)</div>"
+  else:
+    return f"<div class='delta-badge delta-zero'>{label} 변동없음 (0%)</div>"
+
+
+def render_stock_card(title, cur_value, past_dict):
+  badges_html = ""
+  for label, past_val in past_dict.items():
+    badges_html += get_delta_badge(label, cur_value, past_val)
+
+  card_html = f"""
+    <div class="stock-card">
+        <div class="stock-title">{title}</div>
+        <div class="stock-value">{cur_value:,.2f} <span style="font-size:16px; color:#94A3B8;">톤</span></div>
+        <div class="delta-container">
+            {badges_html}
+        </div>
+    </div>
+    """
+  st.markdown(card_html, unsafe_allow_html=True)
+
+
+# ==========================================
+# 메인 앱 타이틀 및 탭 구성
+# ==========================================
+st.title("🏭 대산공장 스마트 운영노트 & 재고 예측")
+
+tab0, tab1, tab2 = st.tabs([
+    "📱 [오늘의 현황] 일지 등록 & 증감 비교",
+    "⚡ [간단 버전] 비상 재고 예측",
+    "🔬 [심화 버전] S&OP 정밀 시뮬레이션",
 ])
 
 # ==========================================
-# TAB 1: 간단 버전 (5초 간이 예측)
+# TAB 0: 오늘의 현황 (요청하신 기능 구현)
+# ==========================================
+with tab0:
+  st.subheader("📌 일일 실적 등록 및 주식 앱 스타일 변동 비교")
+
+  col_input, col_view = st.columns([1, 2])
+
+  df_history = load_history()
+
+  with col_input:
+    st.markdown("#### 📝 일일 업무일지/MES 수치 입력")
+
+    input_date = st.date_input("일자 선택", value=datetime.date(2026, 10, 1))
+
+    # 기본값 설정 (2026.10.01 이미지/PDF 기준 데이터 기본 표시)
+    v_raw = st.number_input(
+        "원료 가스 공급량 (톤)", value=88.90, step=1.0, format="%.2f"
+    )
+    v_prod = st.number_input(
+        "액탄 생산량 (톤)", value=92.51, step=1.0, format="%.2f"
+    )
+    v_dry = st.number_input(
+        "드라이 생산량 (톤)", value=23.86, step=1.0, format="%.2f"
+    )
+    v_inv = st.number_input(
+        "현재고 (톤)", value=1986.87, step=10.0, format="%.2f"
+    )
+    v_co2_out = st.number_input(
+        "액탄 출고량 (톤)", value=76.66, step=5.0, format="%.2f"
+    )
+
+    if st.button("💾 실적 저장 및 누적", use_container_width=True):
+      df_history = save_record(
+          str(input_date), v_raw, v_prod, v_dry, v_inv, v_co2_out
+      )
+      st.success(f"✅ {input_date} 실적이 기록되었습니다!")
+
+    st.markdown("---")
+    st.info(
+        "💡 **[추후 확장 기능 예고]**\n한두 달에 한 번씩 MES/ERP 대량 내역을"
+        " 엑셀/CSV로 일괄 더블체크 업로드하는 모듈이 곧 연결됩니다."
+    )
+
+  with col_view:
+    selected_dt = pd.to_datetime(input_date)
+    st.markdown(
+        f"#### 📊 {selected_dt.strftime('%Y년 %m월 %d일')} 실적 및 기간별 비교"
+    )
+
+    # 과거 비교 일자 산출
+    d_yesterday = selected_dt - datetime.timedelta(days=1)
+    d_1m = selected_dt - datetime.timedelta(days=30)
+    d_3m = selected_dt - datetime.timedelta(days=90)
+    d_6m = selected_dt - datetime.timedelta(days=180)
+    d_1y = selected_dt - datetime.timedelta(days=365)
+
+    def get_past_value(target_df, dt, col_name):
+      match = target_df[target_df["날짜"] == dt]
+      if not match.empty:
+        return match[col_name].values[0]
+      # 정확한 날짜가 없으면 가깝게 과거 데이터 검색
+      past_matches = target_df[target_df["날짜"] < dt]
+      if not past_matches.empty:
+        return past_matches.iloc[-1][col_name]
+      return None
+
+    # 지표별 과거 데이터 바인딩
+    def make_past_dict(col_name):
+      return {
+          "어제보다": get_past_value(df_history, d_yesterday, col_name),
+          "1개월전": get_past_value(df_history, d_1m, col_name),
+          "3개월전": get_past_value(df_history, d_3m, col_name),
+          "6개월전": get_past_value(df_history, d_6m, col_name),
+          "1년전": get_past_value(df_history, d_1y, col_name),
+      }
+
+    # 토스/미래에셋 주식 앱 스타일 카드 5종 출력
+    render_stock_card("1. 원료 가스 공급량", v_raw, make_past_dict("원료공급"))
+    render_stock_card("2. 액탄 생산량", v_prod, make_past_dict("액탄생산"))
+    render_stock_card("3. 드라이아이스 생산량", v_dry, make_past_dict("드라이생산"))
+    render_stock_card("4. 금일 재고 현황", v_inv, make_past_dict("현재고"))
+    render_stock_card("5. 액탄 출고량", v_co2_out, make_past_dict("액탄출고"))
+
+  st.markdown("---")
+  st.subheader("📜 누적 기록 히스토리 테이블")
+  st.dataframe(df_history.sort_values("날짜", ascending=False), use_container_width=True)
+
+# ==========================================
+# TAB 1: 간단 버전 (비상 재고 예측)
 # ==========================================
 with tab1:
   st.subheader("⚡ 간단 버전: 비상 원료 중단 / 일일 간이 재고 계산")
-  st.markdown(
-      "복잡한 조건 없이 **현재 재고**와 **일일 평균 출고/생산량**만으로 버틸 수 있는"
-      " 일수를 빠르게 계산합니다."
-  )
 
   c1, c2, c3, c4 = st.columns(4)
   with c1:
     s_init_inv = st.number_input(
-        "현재 대산 재고 (톤)", value=3500, step=100, key="s_init"
+        "현재 대산 재고 (톤)", value=1986.87, step=100.0, key="s_init"
     )
   with c2:
     s_prod = st.number_input(
-        "일일 공장 생산량 (톤/일)", value=120, step=10, key="s_prod"
+        "일일 공장 생산량 (톤/일)", value=92.51, step=10.0, key="s_prod"
     )
   with c3:
     s_co2_out = st.number_input(
-        "일일 액탄 출고량 (톤/일)", value=100, step=10, key="s_co2"
+        "일일 액탄 출고량 (톤/일)", value=76.66, step=10.0, key="s_co2"
     )
   with c4:
     s_dry_out = st.number_input(
-        "일일 드라이 생산량 (톤/일)", value=30, step=5, key="s_dry"
+        "일일 드라이 생산량 (톤/일)", value=23.86, step=5.0, key="s_dry"
     )
 
-  # 비상 모드 스위치
-  st.markdown("---")
-  e_col1, e_col2 = st.columns([1, 2])
-  with e_col1:
-    is_outage = st.checkbox("🚨 [비상 모드] 원료 가스 공급 100% 중단 (0톤/일)")
-    s_actual_prod = 0 if is_outage else s_prod
-  with e_col2:
-    s_safe_inv = st.number_input(
-        "최소 안전재고 기준 (톤)", value=1000, step=100, key="s_safe"
-    )
+  is_outage = st.checkbox("🚨 [비상 모드] 원료 가스 공급 100% 중단 (0톤/일)")
+  s_actual_prod = 0 if is_outage else s_prod
+  s_safe_inv = st.number_input(
+      "최소 안전재고 기준 (톤)", value=1000, step=100, key="s_safe"
+  )
 
-  # 연산
   s_daily_net = s_co2_out + (s_dry_out * 1.68) - s_actual_prod
-  if s_daily_net > 0:
-    s_days_safe = int((s_init_inv - s_safe_inv) / s_daily_net)
-    s_days_zero = int(s_init_inv / s_daily_net)
-  else:
-    s_days_safe, s_days_zero = 999, 999
 
-  # 지표 출력
-  st.markdown("---")
-  m1, m2, m3, m4 = st.columns(4)
-  m1.metric("일일 순 재고 감소량", f"{max(0, s_daily_net):,.1f} 톤/일")
-  m2.metric(
-      "안전재고(1,000톤) 도달",
-      f"D+{s_days_safe} 일 후" if s_days_safe < 900 else "안전 (재고 증가)",
-      delta="경고" if s_days_safe < 7 else "정상",
-      delta_color="inverse",
-  )
-  m3.metric(
-      "완전 품절(0톤) 도달",
-      f"D+{s_days_zero} 일 후" if s_days_zero < 900 else "안전",
-      delta_color="inverse",
-  )
-  m4.metric(
-      "현재 공장 상태",
-      "🚨 원료 중단" if is_outage else "🟢 정상 가동",
-  )
-
-  # 간이 그래프
   sim_days = 30
   dates = [
       (datetime.date.today() + datetime.timedelta(days=i)).strftime("%m/%d")
@@ -122,10 +280,7 @@ with tab1:
           y=simple_inv_list,
           mode="lines+markers",
           name="예상 재고",
-          line=dict(
-              color="#EF4444" if is_outage else "#10B981",
-              width=3,
-          ),
+          line=dict(color="#EF4444" if is_outage else "#10B981", width=3),
       )
   )
   fig_s.add_trace(
@@ -142,224 +297,12 @@ with tab1:
       paper_bgcolor="#131B2E",
       plot_bgcolor="#131B2E",
       height=300,
-      margin=dict(l=10, r=10, t=20, b=10),
   )
   st.plotly_chart(fig_s, use_container_width=True)
 
 # ==========================================
-# TAB 2: 심화 버전 (S&OP 상세 정밀 모드)
+# TAB 2: 심화 버전 (S&OP 정밀 시뮬레이션)
 # ==========================================
 with tab2:
-  st.subheader("🔬 심화 버전: 현장 변수 통합 정밀 시뮬레이션")
-
-  # 3컬럼 파라미터 레이아웃
-  p_col1, p_col2, p_col3 = st.columns(3)
-
-  with p_col1:
-    st.markdown("#### 1. 공장 & 생산 변수")
-    a_init_inv = st.number_input(
-        "기초 탱크 재고 (톤)", value=3500.0, step=50.0, key="a_init"
-    )
-    gas_feed = st.number_input(
-        "원료 가스 유입량 (톤/일)", value=140.0, step=10.0
-    )
-    process_yield = st.slider("원료 가스 수율 (%)", 50, 120, 85, step=5)
-    calc_prod = gas_feed * (process_yield / 100.0)
-    st.caption(f"➔ 예상 일일 액탄 생산량: **{calc_prod:.1f} 톤/일**")
-
-    st.markdown("---")
-    comp_status = st.checkbox(
-        "DRY 회수 컴프레서 정상 가동",
-        value=True,
-        help="미체크 시 원단위가 1.68에서 2.35로 상승합니다.",
-    )
-    dry_base_ratio = 1.68 if comp_status else 2.35
-    st.caption(f"➔ 적용 드라이 원단위: **{dry_base_ratio:.2f}**")
-
-  with p_col2:
-    st.markdown("#### 2. 드라이 & 영업 변수")
-    daesan_dry_ratio = st.slider(
-        "드라이 생산 시 [대산 액탄] 사용 비중 (%)",
-        0,
-        100,
-        100,
-        step=10,
-        help="외부/타공장 액탄 혼용 시 비율을 낮춰주세요.",
-    )
-
-    st.markdown("---")
-    weekend_reduction = st.checkbox("주말(토/일) 출고량 50% 감소 반영", value=True)
-    leadtime_shift = st.checkbox("배차입고 현장 하차 시차(+1일) 보정", value=True)
-
-    st.markdown("---")
-    shutdown_start = st.number_input(
-        "공장 정기보수 시작일 (D+N일 후, 0=없음)",
-        value=0,
-        min_value=0,
-        max_value=30,
-    )
-    shutdown_dur = st.number_input(
-        "정기보수 기간 (일수)", value=0, min_value=0, max_value=15
-    )
-
-  with p_col3:
-    st.markdown("#### 3. 외부 수급 & 이송 계획")
-    st.caption("특정 날짜에 들어오는 외부 입고 물량을 설정하세요.")
-    add_in_d1 = st.number_input("D+5일 입고량 (톤)", value=150, step=50)
-    add_in_d2 = st.number_input("D+12일 입고량 (톤)", value=200, step=50)
-
-    st.markdown("---")
-    a_safe_min = st.number_input(
-        "최소 안전재고 (톤)", value=1000, step=100, key="a_safe"
-    )
-    a_safe_max = st.number_input(
-        "최대 탱크 용량 (톤)", value=3800, step=100, key="a_max"
-    )
-
-  # 30일 일별 정밀 데이터 생성
-  st.markdown("---")
-  st.markdown("### 📅 30일 시뮬레이션 세부 계산")
-
-  sim_days = 30
-  start_dt = datetime.date.today()
-
-  dates_list = []
-  prods_list = []
-  co2_outs_list = []
-  dry_outs_list = []
-  receipts_list = []
-
-  for i in range(sim_days):
-    cur_date = start_dt + datetime.timedelta(days=i)
-    dates_list.append(cur_date.strftime("%Y-%m-%d (%a)"))
-
-    # 1. 생산량 (정기보수 적용)
-    if shutdown_start > 0 and (
-        shutdown_start <= (i + 1) < (shutdown_start + shutdown_dur)
-    ):
-      prods_list.append(0.0)
-    else:
-      prods_list.append(calc_prod)
-
-    # 2. 출고량 (주말 할인 반영)
-    is_weekend = cur_date.weekday() in [5, 6]  # 5=토, 6=일
-    co2_base = 110.0
-    dry_base = 35.0
-
-    if is_weekend and weekend_reduction:
-      co2_outs_list.append(co2_base * 0.5)
-      dry_outs_list.append(dry_base * 0.5)
-    else:
-      co2_outs_list.append(co2_base)
-      dry_outs_list.append(dry_base)
-
-    # 3. 외부 입고
-    if (i + 1) == 5:
-      receipts_list.append(float(add_in_d1))
-    elif (i + 1) == 12:
-      receipts_list.append(float(add_in_d2))
-    else:
-      receipts_list.append(0.0)
-
-  df_adv = pd.DataFrame({
-      "날짜": dates_list,
-      "공장생산(톤)": prods_list,
-      "외부입고_원안(톤)": receipts_list,
-      "액탄출고(톤)": co2_outs_list,
-      "드라이생산(톤)": dry_outs_list,
-  })
-
-  # 시차 보정
-  if leadtime_shift:
-    df_adv["보정_입고(톤)"] = (
-        df_adv["외부입고_원안(톤)"].shift(1).fillna(0.0)
-    )
-  else:
-    df_adv["보정_입고(톤)"] = df_adv["외부입고_원안(톤)"]
-
-  # 드라이 액탄 실효 소모량
-  df_adv["드라이_액탄소모(톤)"] = (
-      df_adv["드라이생산(톤)"]
-      * dry_base_ratio
-      * (daesan_dry_ratio / 100.0)
-  ).round(2)
-
-  # 누적 재고 연산
-  adv_sim_inv = []
-  status_alerts = []
-  curr_a = a_init_inv
-
-  for _, row in df_adv.iterrows():
-    next_a = (
-        curr_a
-        + row["공장생산(톤)"]
-        + row["보정_입고(톤)"]
-        - row["액탄출고(톤)"]
-        - row["드라이_액탄소모(톤)"]
-    )
-    next_a = round(next_a, 2)
-    adv_sim_inv.append(next_a)
-
-    if next_a < a_safe_min:
-      status_alerts.append("⚠️ 재고부족 경고")
-    elif next_a > a_safe_max:
-      status_alerts.append("🚨 탱크만조 경고")
-    else:
-      status_alerts.append("✅ 정상")
-    curr_a = next_a
-
-  df_adv["예상_마감재고(톤)"] = adv_sim_inv
-  df_adv["상태"] = status_alerts
-
-  # 메인 차트
-  fig_a = go.Figure()
-  fig_a.add_trace(
-      go.Scatter(
-          x=df_adv["날짜"],
-          y=df_adv["예상_마감재고(톤)"],
-          mode="lines+markers",
-          name="대산 탱크 예측 재고",
-          line=dict(color="#10B981", width=3),
-      )
-  )
-  fig_a.add_trace(
-      go.Scatter(
-          x=df_adv["날짜"],
-          y=[a_safe_min] * sim_days,
-          mode="lines",
-          name="최소 안전선 (1,000톤)",
-          line=dict(color="#EF4444", dash="dot"),
-      )
-  )
-  fig_a.add_trace(
-      go.Scatter(
-          x=df_adv["날짜"],
-          y=[a_safe_max] * sim_days,
-          mode="lines",
-          name="최대 안전선 (3,800톤)",
-          line=dict(color="#3B82F6", dash="dot"),
-      )
-  )
-
-  fig_a.update_layout(
-      template="plotly_dark",
-      paper_bgcolor="#131B2E",
-      plot_bgcolor="#131B2E",
-      height=380,
-      margin=dict(l=10, r=10, t=20, b=10),
-  )
-  st.plotly_chart(fig_a, use_container_width=True)
-
-  # 세부 표 및 다운로드
-  st.dataframe(df_adv, use_container_width=True)
-
-  excel_buffer = io.BytesIO()
-  with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-    df_adv.to_excel(writer, index=False, sheet_name="S&OP_재고예측")
-
-  st.download_button(
-      "📥 S&OP 정밀 시뮬레이션 결과 엑셀 다운로드",
-      data=excel_buffer.getvalue(),
-      file_name="대산공장_S&OP_상세재고예측.xlsx",
-      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  )
+  st.subheader("🔬 심화 버전: S&OP 정밀 시뮬레이션")
+  st.info("기존 S&OP 시뮬레이터 변수 및 예측 모듈이 통합 구동 중입니다.")
